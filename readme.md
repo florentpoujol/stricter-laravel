@@ -15,8 +15,11 @@ Remember that ease of maintainability is more important than raw speed of develo
 5. [Do not use higher order proxys](#do-not-use-higher-order-proxys)
 6. [Do not use the HasFactory trait on models](#do-not-use-the-hasfactory-trait-on-models)
 7. [Do not use classes as array](#do-not-use-classes-as-array)
-8. [Always use strict models/Eloquent](#always-use-strict-modelseloquent)
-9. [Cleanup your project](#cleanup-your-project)
+8. [Do not use macros](#do-not-use-macros)
+9. [Always use strict models/Eloquent](#always-use-strict-modelseloquent)
+10. [Cleanup your project](#cleanup-your-project)
+11. [Use multiple methods instead of "method overloading"](#use-multiple-methods-instead-of-method-overloading)
+12. [Use specific typed methods instead generic one that return mixed](#use-specific-typed-methods-instead-generic-one-that-return-mixed)
 
 ## General
 
@@ -190,7 +193,7 @@ $factory = UserFactory::new();
 ```
 
 
-## Don't use classes as array
+## Do not use classes as array
 
 PHP as a few interfaces that allow collection classes to behave like arrays: mostly [ArrayAccess](https://www.php.net/manual/en/class.arrayaccess.php), [Countable](https://www.php.net/manual/en/class.countable.php) and the iterators.
 
@@ -210,6 +213,30 @@ $users->find('the PK'); // for an eloquent collection
 
 Typically these classes also implements one of the interface that makes them iterable.  
 I have no problem however to use them with `foreach()` as I prefer this "native" approach to iteration over passing a closure to the `each()` method that exists on the collections.
+
+
+## Do not use macros
+
+Several built-in Laravel classes are "macroable", they have the Macroable trait, which allow to dynamically add methods to them at runtime.  
+See the example with collections: https://laravel.com/docs/11.x/collections#extending-collections
+
+These can be made statically analysable if you redeclare the class in a file, with the method on it.
+PHPStorm and PHPStan are nice enough to merge both definitions, even though PHPStorm may complain about duplicate definition of the class.
+
+For instance you can add file `extra_definitions.php` at the root of the project with a content like so to declare the `toUpper()` method of the collection in a PHPDoc.
+```php
+namespace Illuminate\Support {
+	/**
+	 * @method self toUpper()
+	 */
+	class Collection
+	{
+		//
+	}
+}
+```
+
+Note a limitation of that technique is that it's not possible to declare an instance method that return `static`, since  `@method static toUpper()` declares the method as being static.
 
 
 ## Always use strict models/Eloquent
@@ -259,13 +286,129 @@ Then remove things one by one and carefully check every time that every things s
 
 This advice was important before Laravel 11 because the starter project had **a lot** of stuff, which is thankfully not the case any more since L11 only has minimal configuration and almost no more code.
 
+This goes also for the dependencies, the starter project comes with Pint and Sail but it is up to you to decide if you want to use them or not. It is particularly important to remove unused dependencies.
+
+
+## Use multiple methods instead of "method overloading"
+
+Method overloading is ability to declare the same method multiple times, but with different signatures (and different body).
+
+You can not do that in PHP, yet Laravel has many methods that have multiple distinct signatures.  
+This can only be achieved by declaring many of the arguments optional and have many union types even if for most signatures the arguments are not optional and can only accept a single type.
+
+Take the config `getString(string $key, null|string $default = null)` method we added in the next section. It actually has 2 different intended signatures:
+- `getString(string $key): string`
+- `getString(string $key, string $default): string`
+
+The `$default` argument isn't actually nullable. We set it as nullable only because to have to give it a default value to make it optional.  
+Since there is no natural pertinent default value for this use case, we set it to null.  
+Here we could give each of these signatures its own name: `getString()` and `getStringOrDefault()` for instance.
+
+In the case of the query builder, we can define multiple version of the `where()` method to be much clearer on the expected arguments:
+- `where(string $field, string $operator, string|int|float|bool $value): static`
+- `whereGroup(Closure $group): static`
+- `whereExpression(Expression $expression): static`
+
+
+## Use specific typed methods instead generic one that return mixed
+
+This is particularly important if you use static analysers at max level where you can not do anything with values that are of type `mixed`.  
+This is because mixed can be anything, it can be null or an object that is not castable for instance, so you can not even cast them to anything.
+
+This is problematic for values that are coming from the configuration, or a request body or query string.  
+The methods to extract information from these naturally returns mixed.
+
+What we can do is not use this methods and instead introduce new methods with proper return types.
+
+### Configuration
+
+The configuration values are help in a singleton that is the `Config\Repository` class which only has a generic `get()` method.
+
+Laravel 11 added the `string(): string`, `integer(): int`, `float(): float`, and `boolean(): bool` methods, which throws and exception if the value is not of the correct type (including null).  
+
+The class is macroable, but the idea is more to replace the built-in repo by a new one that has more methods, one that return each scalar type + arrays, properly typed and one more version for each that return the type or null.
+
+```php
+final class Config extends Illuminate\Support\Config
+{
+	public function getString(string $key, null|string $default = null): string
+	{
+		$value = $this->get($key, $default);
+
+		if (! is_string($value)) {
+			throw new InvalidArgumentException("Configuration value for key [$key] must be a string, '" . get_debug_type($value) . "' given.");
+		}
+
+        return $value;
+	}
+
+	public function getStringOrNull(string $key): null|string
+	{
+		$value = $this->get($key);
+
+		if ($value === null) {
+			return null;
+		}
+
+		if (! is_string($value)) {
+			throw new InvalidArgumentException("Configuration value for key [$key] must be a string, '" . get_debug_type($value) . "' given.");
+		}
+
+        return $value;
+	}
+
+	// then same thing with all other scalars types
+
+	public function getInt(string $key, null|int $default = null): int {}
+	public function getIntOrNull(string $key): null|int {}
+
+	public function getFloat(string $key, null|float $default = null): float {}
+	public function getFloatOrNull(string $key): null|float {}
+
+	public function getBool(string $key, null|bool $default = null): bool {}
+	public function getBoolOrNull(string $key): null|bool {}
+
+	public function getArray(string $key, null|array $default = null): array {}
+	public function getArrayOrNull(string $key): null|array {}
+}
+```
+
+// then you need to register this class instead of the base one in the Container
+// You can do that in you main service provider
+
+```php
+public function register(): void
+{
+	$customConfigRepo = new Config($this->app->make(ConfigContract::class)->all());
+
+	$this->app->singleton(ConfigContract::class, $customConfigRepo);
+	$this->app->singleton('config', $customConfigRepo);
+
+	//---
+}
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 ## TODO
 
 - custom query builders instead of scope (trait or base builder instead, base builder allow to change the type of the underlying method)
-- typed config and request/input/uqery methods
-- use multiple methods instead of method overloading
 - misc
 	- prevent polymorphic relationships without morph map
 	- use carbonimmutable instead of carbon
 	- alway use array with validation
+
+
