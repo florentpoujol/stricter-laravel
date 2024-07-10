@@ -11,8 +11,12 @@ Remember that ease of maintainability is more important than raw speed of develo
 1. [General](#general)
 2. [Use dependency injection whenever possible](#use-dependency-injection-whenever-possible)
 3. [Do not use helper functions or facades](#do-not-use-helper-functions-or-facades)
-4. [Do not use Facade aliases](do-not-use-facade-aliases)
-
+4. [Do not use Facade aliases](#do-not-use-facade-aliases)
+5. [Do not use higher order proxys](#do-not-use-higher-order-proxys)
+6. [Do not use the HasFactory trait on models](#do-not-use-the-hasfactory-trait-on-models)
+7. [Do not use classes as array](#do-not-use-classes-as-array)
+8. [Always use strict models/Eloquent](#always-use-strict-modelseloquent)
+9. [Cleanup your project](#cleanup-your-project)
 
 ## General
 
@@ -143,7 +147,7 @@ Some examples:
 Before Laravel 11, there is a `app.aliases` configuration array, which map a short name with a class FQCN.
 It is only ever used for facades but can be used for any classes.
 
-This allow to use facades (or other classes) without even using their FQCN or adding the `use` statement, which, like helpers is only ever maybe useful in Tinker.
+This allow to use facades (or other classes) without even using their FQCN or adding the `use` statement, which, like helpers may only ever be useful in Tinker.
 
 I prefer to empty completely this list so that no alias is registered. Note that the autoloader callback is still being registered, which is a little annoying when your are step-debugging with xDebug.
 
@@ -158,18 +162,110 @@ AliasLoader::setInstance($loader);
 ```
 
 
+## Do not use [higher order proxys](https://laravel.com/docs/11.x/collections#higher-order-messages)
+
+Because there are not statically analysable, and there is not way to make them so.
+
+Instead, use the method normally and pass a closure to them. With short closure, the code is barely longer.
+```php
+$users = User::where(...)->get();
+
+$users->each(fn (User $user) => $user->markAsVip());
+
+$sum = $users->sum(fn (User $user) => $user->votes);
+```
+
+
+## Do not use the HasFactory trait on models
+
+The `HasFactory` trait, used on models, provide a `factory()` static method that returns the factory of the model.
+Since the factory itself is always named after the model, it is as much clear to work with the factory directly, which prevent an indirection and a trait on all models.
+
+```php
+// instead of 
+$factory = User::factory();
+
+// do
+$factory = UserFactory::new();
+```
+
+
+## Don't use classes as array
+
+PHP as a few interfaces that allow collection classes to behave like arrays: mostly [ArrayAccess](https://www.php.net/manual/en/class.arrayaccess.php), [Countable](https://www.php.net/manual/en/class.countable.php) and the iterators.
+
+Mistaking objects for arrays by using the square brackets on them or passing them to the `count()` function I think leads to code that it confusing. 
+
+Laravel collections are such classes.
+The idea is to just not use these features on what you know is an object, when they provide methods to do the same things.
+
+Ie:
+```php
+$users->count(); // instead of count($users)
+
+// instead of $users['the key']:
+$users->get('the key'); // for a base collection
+$users->find('the PK'); // for an eloquent collection
+```
+
+Typically these classes also implements one of the interface that makes them iterable.  
+I have no problem however to use them with `foreach()` as I prefer this "native" approach to iteration over passing a closure to the `each()` method that exists on the collections.
+
+
+## Always use strict models/Eloquent
+
+Models have dynamic attributes, that may or may not exists.  
+It is also easy for the unfamiliar to produce N+1 queries.
+
+To alleviate some of the problems caused by that [Laravel allow to configure three behaviours](https://laravel.com/docs/11.x/eloquent#configuring-eloquent-strictness).
+
+Eloquent can prevent when lazy loading (N+1 queries) is happening and then throw an exception.  
+
+Then as explained in the doc, Laravel can also throw an exception if you try to set an unfillable attribute.
+If that happens it may indicate that you are fetching to much fields from the database, or are not properly restricting the data you consider when validating a form for instance.
+For that to properly work, you should always mention all the fillable attributes in the model's `$fillable` property to clearly mark which are.
+
+Finally, and that's not mentioned in the doc, Laravel can also prevent accessing an attribute that do not exists (with the model's `preventAccessingMissingAttributes()` method).  
+If that happens, it may be because you are not fetching enough fields from the database for instance.
+
+The Model's `shouldBeStrict()` method can be used to set all three behaviours at the same time.  
+So in your app main service provider, you should have the line
+```php
+Model::shouldBeStrict(! $this->app->isProduction());
+``` 
+
+Typically these behaviour are enabled in the local and testing environment, where they are harmless and where its easy to fix but not in Production since by default they cause an uncaught exception.
+
+Alternatively you can still enable it in prod but with an easy way to deactivate it, or catch the exception to only produces a log for instance.  
+Each of these behaviour have there own exceptions (so they are easy to handle in the main exception handler), and you can also provide for each of them a specific callback, with the methods like `Model::handleLazyLoadingViolationUsing($callback)`.
+
+
+## Cleanup your project
+
+The [Laravel starter project](https://github.com/laravel/laravel) repo is what will become your project. Once you install Laravel all these files become yours. 
+
+**They are your responsibility, Laravel will not come to maintain them.**  
+
+This is the same thing with files that are generated with the Artisan make command: once they are generated, they are yours, so check them.
+Note that you can modify stubs, see https://laravel.com/docs/11.x/artisan#stub-customization and https://laravel-news.com/customizing-stubs-in-laravel
+
+This is your job to check that all these files are needed, that all their content is needed, and that it match you code quality standards.
+
+So you have to make sure that you understand every configuration options, what every middleware do, etc...
+
+Be advised though, that removing stuff that you do not know or understand at all may break the app.  
+Ideally, you should do that after having a working app with some content and test and before the first deployment to production.  
+Then remove things one by one and carefully check every time that every things still works.
+
+This advice was important before Laravel 11 because the starter project had **a lot** of stuff, which is thankfully not the case any more since L11 only has minimal configuration and almost no more code.
+
+
 ## TODO
 
-- no higherorderproxy
 - custom query builders instead of scope (trait or base builder instead, base builder allow to change the type of the underlying method)
 - typed config and request/input/uqery methods
+- use multiple methods instead of method overloading
 - misc
-	- type everything
-	- no hasfactory on models
-	- prevent lazy loading
 	- prevent polymorphic relationships without morph map
-	- use fillable
-	- preventSilentlyDiscardingAttributes preventAccessingMissingAttributes shouldBeStrict
-	- don't use string name for service, use interfaces FQCN
 	- use carbonimmutable instead of carbon
-	- dont use collections as array
+	- alway use array with validation
