@@ -17,9 +17,10 @@ Remember that ease of maintainability is more important than raw speed of develo
 7. [Do not use classes as array](#do-not-use-classes-as-array)
 8. [Do not use macros](#do-not-use-macros)
 9. [Always use strict models/Eloquent](#always-use-strict-modelseloquent)
-10. [Cleanup your project](#cleanup-your-project)
-11. [Use multiple methods instead of "method overloading"](#use-multiple-methods-instead-of-method-overloading)
-12. [Use specific typed methods instead generic one that return mixed](#use-specific-typed-methods-instead-generic-one-that-return-mixed)
+10. [Always enforce the morph map](#always-enforce-the-morph-map)
+11. [Cleanup your project](#cleanup-your-project)
+12. [Use multiple methods instead of "method overloading"](#use-multiple-methods-instead-of-method-overloading)
+13. [Use specific typed methods instead generic ones that return mixed](#use-specific-typed-methods-instead-generic-ones-that-return-mixed)
 
 ## General
 
@@ -267,6 +268,17 @@ Alternatively you can still enable it in prod but with an easy way to deactivate
 Each of these behaviour have there own exceptions (so they are easy to handle in the main exception handler), and you can also provide for each of them a specific callback, with the methods like `Model::handleLazyLoadingViolationUsing($callback)`.
 
 
+## Always enforce the morph map
+
+When you use polymorphic relationships, one of the field involved contains the "type" of the model.
+By model the value is the models FQCN, so for instance `App\Model\User`, which contain 10 useless characters (`App\Model\`) but that still must be indexed.
+
+As a simple optimisation Laravel allow you to alias you model FQCN's to shorter string via the MorphMap : https://laravel.com/docs/11.x/eloquent-relationships#custom-polymorphic-types
+
+Typically it is defined in a service provider and I suggest that you always use the `Relation::enforceMorphMap()` method even when you don't yet need polymorphic relations.  
+That way you will get an exception when you will define your first one if you forget to setup an alias.
+
+
 ## Cleanup your project
 
 The [Laravel starter project](https://github.com/laravel/laravel) repo is what will become your project. Once you install Laravel all these files become yours. 
@@ -310,23 +322,22 @@ In the case of the query builder, we can define multiple version of the `where()
 - `whereExpression(Expression $expression): static`
 
 
-## Use specific typed methods instead generic one that return mixed
+## Use specific typed methods instead generic ones that return mixed
 
 This is particularly important if you use static analysers at max level where you can not do anything with values that are of type `mixed`.  
 This is because mixed can be anything, it can be null or an object that is not castable for instance, so you can not even cast them to anything.
 
-This is problematic for values that are coming from the configuration, or a request body or query string.  
-The methods to extract information from these naturally returns mixed.
+This is problematic for values that are coming from the configuration, or a request body or query string for instance because the methods to extract information from these naturally returns mixed.
 
-What we can do is not use this methods and instead introduce new methods with proper return types.
+What we can do is not use these methods and instead introduce new, more specific methods that have proper return types.
 
 ### Configuration
 
-The configuration values are help in a singleton that is the `Config\Repository` class which only has a generic `get()` method.
+The whole configuration is held in a singleton that is the `Config\Repository` class which only has a generic `get(string $key, mixed $default): mixed` method to extract values.
 
-Laravel 11 added the `string(): string`, `integer(): int`, `float(): float`, and `boolean(): bool` methods, which throws and exception if the value is not of the correct type (including null).  
+Laravel 11 added the `string(): string`, `integer(): int`, `float(): float`, `boolean(): bool`, and `array(): array` methods, to get value of the corresponding type which throws and exception if the value is not correct (including null).  
 
-The class is macroable, but the idea is more to replace the built-in repo by a new one that has more methods, one that return each scalar type + arrays, properly typed and one more version for each that return the type or null.
+The idea is to replace the built-in repo by a new one that has more methods, one that return each scalar type + arrays, properly typed and one more version for each that return the type or null.
 
 ```php
 final class Config extends Illuminate\Support\Config
@@ -346,7 +357,7 @@ final class Config extends Illuminate\Support\Config
 	{
 		$value = $this->get($key);
 
-		if ($value === null) {
+		if ($value === null) { // this if is the only difference with the previous method
 			return null;
 		}
 
@@ -373,8 +384,7 @@ final class Config extends Illuminate\Support\Config
 }
 ```
 
-// then you need to register this class instead of the base one in the Container
-// You can do that in you main service provider
+Then you need to register this class instead of the base one in the Container. You can do that in your main service provider.
 
 ```php
 public function register(): void
@@ -387,6 +397,34 @@ public function register(): void
 	//---
 }
 ```
+
+### Request body and query string
+
+The Illuminate Request object has the `Illuminate/Http/Concerns/InteractsWithInput` trait that contains the method used to extract values from the body or query string (among others).
+
+Typically you use mostly the `post(): array|string|null` (to get values from the body), `query(): array|string|null` (to get values from the query string) or `input(): mixed` (to get values from either) methods. 
+For a long time you could also retrieve a boolean or a date from the body with the `boolean` and `` methods.
+
+Laravel 9 added other type specific methods: `integer`, `float`, `string` and `enum`.
+
+If you want other version of these methods, like with other names or that may return null or that distinguish between retrieving a value from the body or the query string, you can have them own your own Request object that inherit from Laravel's one.
+
+Then you can edit the `public/index.php` file in your project to use the correct Request object.  
+Of course when you inject the request to methods or constructor, you must use your request class instead of the base one.
+
+In some situations, you may need to actually register your custom request object with the same aliases that the base object has.   
+In you app's main service provider you can write this: 
+```php
+public function register(): void
+{
+	$request = $this->app->make(MyCustomRequest::class);
+
+	$this->app->singleton('request', $request);
+	$this->app->singleton(\Illuminate\Http\Request::class, $request);
+	$this->app->singleton(\Symfony\Component\HttpFoundation\Request::class, $request);
+}
+```
+
 
 
 
@@ -406,9 +444,4 @@ public function register(): void
 ## TODO
 
 - custom query builders instead of scope (trait or base builder instead, base builder allow to change the type of the underlying method)
-- misc
-	- prevent polymorphic relationships without morph map
-	- use carbonimmutable instead of carbon
-	- alway use array with validation
-
 
