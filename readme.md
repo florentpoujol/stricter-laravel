@@ -21,6 +21,7 @@ Remember that ease of maintainability is more important than raw speed of develo
 11. [Cleanup your project](#cleanup-your-project)
 12. [Use multiple methods instead of "method overloading"](#use-multiple-methods-instead-of-method-overloading)
 13. [Use specific typed methods instead generic ones that return mixed](#use-specific-typed-methods-instead-generic-ones-that-return-mixed)
+14. [Use custom query builders or repositories instead of scopes](#use-custom-query-builders-or-repositories-instead-of-scopes)
 
 ## General
 
@@ -426,22 +427,170 @@ public function register(): void
 ```
 
 
+## Use custom query builders or repositories instead of scopes
+
+One of the most defining feature of Laravel is the ability to work with the database seamlessly through the models.
+
+You can call what looks like a static methods on the models when in fact they are instance methods of a query builder.
+And you can call on the query builder instances method that are actually defined on the model with a different name (the local scopes).
+
+Of course these pattern are not wanted because they are not statically analysable and I think they are more confusing than anything.
+
+The first pattern can be very easily avoided by calling the `query(): Illuminate\Database\Eloquent\Builder` method on the model, which return the Eloquent query builder instance.
+```php
+// instead of
+User::where(...)->get();
+
+// do
+User::query()->where(...)->get();
+```
+
+Another alternative, that is practical only for the methods that you use the most, maybe like `where()` and `find()` for instance, is to actually declare them as static methods on the model.
+
+The second pattern is the use of scopes, global or local : https://laravel.com/docs/11.x/eloquent#query-scopes
+
+The solutions for that is more involved and require to move your scope methods either in repositories, or in custom query builders classes.
+
+### Repositories
+
+First, repositories are not a pattern specific to DataMapper ORMs. You can absolutely do ActiveReccord inside a repository. Do what you think is best for your app.
+
+Second, repositories allows for easy mocking during tests (which custom query builders like I will show in the next section do not allow), and thus integration tests without the database that are probably easier to setup and faster to run.
+
+The idea here is to have specific classes (one per model) where you actually do SQL requests, which are the best place to have the method that do more work.  
+Here is some example from the documentation, as a repository:
+```php
+use Illuminate\Database\Eloquent\Builder;
+
+final class AncienUserRepository
+{
+	private function getBuilder(): Builder
+	{
+		$builder = User::query();
 
 
+		// add your "global" scopes here or in dedicated methods
+		$builder->where('created_at', '<', new DateTimeImmutable('- 2000 years'));
 
+		// if a scope should be shared with multiple models, add it in a method in a trait, or use a dedicated class to encapsulate them
 
+		return $builder;
+	}
+	
+	
+	// A "local" scope.
+	// If the method is public, it can even be used from outside the repository
+	public function whereIsPopular(Builder $builder): void
+    {
+        $builder->where('votes', '>', 100);
+    }
 
+    // a regular method, that should be called from a controller or service, that uses both scopes defined here
+    public function getPopularUsers(): Collection
+    {
+    	$builder = $this->getBuilder();
 
+    	// then use the local scope in dedicated methods of the repository which you query from your services or controllers
+    	$this->whereIsPopular($builder);
 
+    	return $builder->get();
+    }
+}
+```
 
+Note that with the simple code as shown here, there is no way to do a query through the repository without the "global scopes".
 
+But all of that is easily statically analysable, encapsulate the "complexity" of building an SQL requests and is easily injectable as dependency in any service.
 
+### Custom query builder
 
+The other solution is also not mentioned in the documentation. But you can as easily have dedicated custom query builder classes, that inherit or compose the Eloquent query builder.
 
+The query builder used by each model is defined in the static `$builder` property that you can override in each of your models.  
+Before Laravel 11, it was hardcoded in the `newEloquentBuilder` method, which you can also override.
 
+Here is an example of query builder method, similar to the repository of above:
+```php
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Query\Builder as BaseBuilder;
 
+final class AncienUserBuilder extends Builder
+{
+	public function __construct(BaseBuilder $baseBuilder)
+	{
+		parent::__construct($baseBuilder);
 
-## TODO
+		// add your "global" scopes here or in dedicated methods
+		$this->where('created_at', '<', new DateTimeImmutable('- 2000 years'));
 
-- custom query builders instead of scope (trait or base builder instead, base builder allow to change the type of the underlying method)
+		// if a scope should be shared with multiple models, add it in a method in a trait, or use a dedicated class to encapsulate them
+	}
+	
+	// A "local" scope.
+	// If the method is public, it can even be used from outside the repository
+	public function whereIsPopular(): self
+    {
+        $this->where('votes', '>', 100);
+
+        return $this;
+    }
+
+    // a regular method, that should be called from a controller or service, that uses both scopes defined here
+    public function getPopularUsers(): Collection
+    {
+    	return $this
+    		->whereIsPopular() 
+    		->get();
+    }
+}
+
+// in the body of the User model:
+protected static string $builder = AncienUserBuilder::class
+
+// and then use it from a controller or service:
+$user = User::query()->getPopularUsers();
+// or if you do not want to have "repository like" methods, just use any methods of the query builder directly
+$user = User::query()->whereIsPopular()->get();
+```
+
+Having your own query builder also allow to define any other methods that are not model-specific.  
+In this case you either must define them in a trait that is added to all builders, or have all builder extends a base one, which is the one that extends the Eloquent builder.
+
+For instance in the section [12. Use multiple methods instead of "method overloading"](#use-multiple-methods-instead-of-method-overloading), I gave some versions of the where method, that we can no write:
+
+```php
+use Illuminate\Database\Eloquent\Builder;
+use Illuminate\Database\Query\Builder as BaseBuilder;
+
+abstract class CommonBuilder extends Builder
+{
+	/**
+	 * @param string $column
+	 * @param string $operator
+	 * @param int|float|string|bool $value
+	 * @param 'and|'or' $boolean
+	 */
+	public function where($column, $operator = null, $value = null, $boolean = 'and'): static
+	{
+		if (!in_array($operator, $this->query->operators, true)) {
+			throw new UnexpectedValueException('Call the where method only with this signature: where(string $column, string $operator, int|float|string|bool $value)');
+		}
+
+		parent::where($column, $operator, $value, $boolean);
+
+		return $this;
+	}
+
+	public function whereGroup(Closure $group): static
+	{
+		parent::where($group);
+
+		return $this;
+	}
+}
+```
+
+Ideally in this example we should have redefined the `where()` signature to what we want it to be, but in this case we can't since our builder extends from Eloquent's and the options to change a method argument signature is very limited.  
+So in this example we just throw an exception if we detect that the signature isn't correct because the operator argument is clearly not an operator, which still forces to use the method the way we want.
+The alternative would be to have our builder decorate the Eloquent builder instead of extending it.
 
