@@ -22,6 +22,8 @@ Remember that ease of maintainability is more important than raw speed of develo
 12. [Use multiple methods instead of "method overloading"](#use-multiple-methods-instead-of-method-overloading)
 13. [Use specific typed methods instead generic ones that return mixed](#use-specific-typed-methods-instead-generic-ones-that-return-mixed)
 14. [Use custom query builders or repositories instead of scopes](#use-custom-query-builders-or-repositories-instead-of-scopes)
+15. [Declare all the attribute of a model via PHPDoc](#declare-all-the-attributes-of-a-model-via-phpdoc)
+16. [In JsonResources, access the model's data through the $resource property](#in-jsonresources-access-the-models-data-through-the-resource-property)
 
 ## General
 
@@ -253,10 +255,10 @@ To alleviate some of the problems caused by that [Laravel allow to configure thr
 Eloquent can prevent when lazy loading (N+1 queries) is happening and then throw an exception.  
 
 Then as explained in the doc, Laravel can also throw an exception if you try to set an unfillable attribute.
-If that happens it may indicate that you are fetching to much fields from the database, or are not properly restricting the data you consider when validating a form for instance.
+If that happens it may indicate that you are fetching too many fields from the database, or are not properly restricting the data you consider when validating a form for instance.
 For that to properly work, you should always mention all the fillable attributes in the model's `$fillable` property to clearly mark which attributes are indeed fillable.
 
-Finally, and that's not mentioned in the doc, Laravel can also prevent accessing an attribute that do not exists (with the model's `preventAccessingMissingAttributes()` method).  
+Finally, and that's not mentioned in the doc, Laravel can also prevent accessing an attribute that do not exist (with the model's `preventAccessingMissingAttributes()` method).  
 If that happens, it may be because you are not fetching enough fields from the database for instance.
 
 The Model's `shouldBeStrict()` method can be used to set all three behaviours at the same time.  
@@ -474,7 +476,7 @@ The solutions for that (to not use any scope) is more involved and require to mo
 First, repositories are not a pattern specific to DataMapper ORMs. You can absolutely do Active Record inside a repository (even though it may feel a little weird).  
 **Do what you think is best for your app**.
 
-Second, repositories allows for easy mocking/replacement during tests (which custom query builders like I will show in the next section do not allow), and thus integration tests without the database that are probably easier to setup and faster to run.
+Second, repositories allows for easy mocking/replacement during tests (which custom query builders like I will show in the next section do not allow), and thus integration tests without the database that are probably easier to set up and faster to run.
 
 The idea here is to have specific classes (one per model) where you actually do SQL requests, which are the best place to have the method that do more work.  
 Here is some example from the documentation, as a repository:
@@ -578,7 +580,7 @@ $user = User::query()->whereIsPopular()->get();
 Having your own query builder also allow to define any other methods that are not model-specific.  
 In this case you either must define them in a trait that is added to all builders, or have all builder extends a base one, which is the one that extends the Eloquent builder.
 
-For instance in the section [12. Use multiple methods instead of "method overloading"](#use-multiple-methods-instead-of-method-overloading), I gave some versions of the where method, that we can no write:
+For instance in the section [12. Use multiple methods instead of "method overloading"](#use-multiple-methods-instead-of-method-overloading), I gave some versions of the where() method, that we can not write:
 
 ```php
 use Illuminate\Database\Eloquent\Builder;
@@ -619,3 +621,94 @@ Ideally in this example we should have redefined the `where()` signature to what
 So in this example we just throw an exception if we detect that the signature isn't correct because the operator argument is clearly not an operator, which still forces to use the method the way we want.
 
 The alternative would be to have our builder decorate the Eloquent builder instead of extending it.
+
+## Declare all the attributes of a model via PHPDoc
+
+The models attribute are dynamic, which mean that they don't exist.   
+Whether they are based on a field that exists in the database, or based on a relation, or a mutator we access these attributes as if they were mere properties. But because of how the model work, these properties purposefully do not exist, which doesn't help with static analysis.
+
+One solution is to use PHPDoc at the top of the class to declare the existence and the type of each attribute.  
+The point also is to take any casts into account, not just take the type in the database.
+
+Ie:
+```php
+/**
+ * @property int $id
+ * @property UserStatus $status An enum
+ * @property array<string, mixed> $custom_data A field that contains some JSON, with the array cast
+ * @property CarbonImmutable $created_at 
+ * 
+ * @property-read bool $isAdmin Properties based on mutators can also be marked as read or write-only.
+ * 
+ * @property Role $role
+ * @property Collection<Article> $articles
+ * 
+ * @method static Builder<self> query()
+ */
+final class MyModel extends Model
+{
+    // ...
+}
+```
+
+When you have a lot of model, with a lot of attributes, it can be a little daunting to set up everything yourself.
+Thankfully, the [barryvdh/laravel-ide-helper](https://github.com/barryvdh/laravel-ide-helper?tab=readme-ov-file#automatic-phpdocs-for-models) package can do most of the work for you, but you still need to go over every model to make sure everything is correct. 
+
+## In JsonResources, access the model's data through the `$resource` property
+
+[JsonResources](https://laravel.com/docs/11.x/eloquent-resources) are model decorators dedicated to transforming them for an API JsonResponse.
+
+You can access all the model's properties directly on the resource instance, which is not statically analysable.  
+
+Assuming you have set up the PHPDoc to describe the model's attributes like shown in the section above, you can use the PHPDoc `@mixin` to "import" the definition of the models attributes into the current class.
+
+But a better way in my opinion is just to properly type the `$resource` property that holds the model. 
+
+Instead of:
+```php
+/**
+ * @mixin App\Models\MyModel 
+ */
+class MyJsonResource extends JsonResource
+{
+    /**
+     * @return array<string, mixed>
+     */
+    public function toArray(): array
+    {
+        return [
+            'uid' => $this->uid,
+            'created_at' => $this->created_at->toDateTimeString(),        
+        ];
+    }
+}
+```
+
+Do (this actually shows 3 alternatives to use the $resource property while it being typed):
+```php
+/**
+ * @property App\Models\MyModel $resource 
+ */
+final class MyJsonResource extends JsonResource
+{
+    // Or you can do it this way, by redefining the actual property in the class.
+    // But since you can't actually add the typehint, there is not many benefits over the property PHPDoc above the class.
+
+    /** @var App\Models\Invoice */
+    public $resource;
+    
+    /**
+     * @return array<string, mixed>
+     */
+    public function toArray(): array
+    {
+        assert($this->resource instanceof MyModel); // yet another alternative that can be enough if you are not accessing the property in another method, otherwise, the PHPDoc is a better choice
+        
+        return [
+            'uid' => $this->resource->uid,
+            'created_at' => $this->resource->created_at->toDateTimeString(),        
+        ];
+    }
+}
+```
+
